@@ -277,29 +277,19 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
 .install-txt{flex:1;font-size:11px;color:var(--text2);line-height:1.5}
 .install-x{color:var(--text3);padding:6px;cursor:pointer;font-size:16px;flex-shrink:0}
 
-/* ── Lang toggle ── */
-.lang-toggle{
-  display:none;flex-shrink:0;padding:6px 16px 4px;
-  gap:4px;align-items:center;background:var(--bg);
+/* ── Per-card translate button ── */
+.tl-btn{
+  flex-shrink:0;align-self:flex-start;margin-top:1px;
+  font-family:'DM Mono',monospace;font-size:10px;font-weight:500;
+  border:1px solid var(--border2);background:transparent;color:var(--text3);
+  border-radius:5px;padding:3px 7px;cursor:pointer;transition:all .2s;
+  -webkit-appearance:none;white-space:nowrap;line-height:1.4;
 }
-.lang-toggle.show{display:flex}
-.lang-lbl{font-family:'DM Mono',monospace;font-size:9px;color:var(--text3);letter-spacing:1px;margin-right:6px}
-.lang-btn{
-  font-family:'DM Mono',monospace;font-size:11px;font-weight:500;
-  border:1px solid var(--border2);background:transparent;color:var(--text2);
-  border-radius:6px;padding:4px 10px;cursor:pointer;transition:all .15s;
-  -webkit-appearance:none;
-}
-.lang-btn.active{
-  background:rgba(61,142,240,.15);color:var(--accent2);
-  border-color:rgba(61,142,240,.5);
-}
-.lang-btn:active{opacity:.7}
-.translating-badge{
-  margin-left:auto;font-family:'DM Mono',monospace;font-size:9px;
-  color:var(--yellow);letter-spacing:.5px;opacity:0;transition:opacity .3s;
-}
-.translating-badge.show{opacity:1}
+.tl-btn:active{opacity:.6}
+.tl-btn.loading{color:var(--yellow);border-color:rgba(245,200,66,.4);animation:tlpulse 1s ease-in-out infinite}
+.tl-btn.done{color:var(--accent2);border-color:rgba(91,163,245,.35);background:rgba(61,142,240,.08)}
+.tl-btn.done:active{background:rgba(61,142,240,.15)}
+@keyframes tlpulse{0%,100%{opacity:1}50%{opacity:.4}}
 
 /* ── Error toast ── */
 .toast{
@@ -385,14 +375,6 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
     <button class="ftab" onclick="flt('src:google_news')">Google</button>
     <button class="ftab" onclick="flt('src:reddit')">Reddit</button>
     <button class="ftab" onclick="flt('src:stocktwits')">StockTwits</button>
-  </div>
-
-  <!-- Lang toggle -->
-  <div class="lang-toggle" id="langToggle">
-    <span class="lang-lbl">LANG</span>
-    <button class="lang-btn active" id="btnEN" onclick="setLang('en')">EN</button>
-    <button class="lang-btn" id="btnJP" onclick="setLang('jp')">JP</button>
-    <span class="translating-badge" id="transBadge">翻訳中...</span>
   </div>
 
   <!-- Article list -->
@@ -518,7 +500,6 @@ let watchlist = JSON.parse(localStorage.getItem('fn_watch') || '[]');
 let articles  = [];
 let filter    = 'all';
 let curTick   = '';
-let langMode  = 'en'; // 'en' or 'jp'
 let translationCache = {}; // url -> translated title
 
 // ─────────────────────────────────────────
@@ -722,11 +703,7 @@ async function doFetch() {
   curTick   = tick;
   articles  = [];
   filter    = 'all';
-  langMode  = 'en';
   translationCache = {};
-  document.getElementById('btnEN').classList.add('active');
-  document.getElementById('btnJP').classList.remove('active');
-  document.getElementById('langToggle').classList.remove('show');
   renderList();
   setBusy(true);
   setSignal('取得中', true);
@@ -767,53 +744,58 @@ async function doFetch() {
     setStatus(`✅ ${totalFound}件取得完了 — ${tick}`);
     setSignal(`${totalFound}件`, false);
     addToWatch(tick);
-    document.getElementById('langToggle').classList.add('show');
   }
 }
 
 // ─────────────────────────────────────────
-// TRANSLATION (JP/EN)
+// TRANSLATION (per-card)
 // ─────────────────────────────────────────
-async function setLang(mode) {
-  langMode = mode;
-  document.getElementById('btnEN').classList.toggle('active', mode === 'en');
-  document.getElementById('btnJP').classList.toggle('active', mode === 'jp');
-  if (mode === 'jp') {
-    await translatePendingArticles();
+async function translateCard(url, btnEl) {
+  // キャッシュ済み → タイトルを切り替えるだけ
+  if (translationCache[url]) {
+    toggleCardTitle(url, btnEl);
+    return;
   }
-  renderList();
+  const article = articles.find(a => a.url === url);
+  if (!article || article.lang === 'ja') return;
+
+  btnEl.classList.add('loading');
+  btnEl.textContent = '翻訳中';
+
+  try {
+    const q   = encodeURIComponent(article.title.slice(0, 500));
+    const res = await fetch(`https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=ja&dt=t&q=${q}`);
+    const data = await res.json();
+    const translated = data[0].map(seg => seg[0]).join('').trim();
+    translationCache[url] = translated || article.title;
+  } catch(e) {
+    translationCache[url] = article.title;
+  }
+
+  toggleCardTitle(url, btnEl);
 }
 
-async function translatePendingArticles() {
-  const toTranslate = articles.filter(a => {
-    const isAlreadyJP = a.lang === 'ja';
-    const cached = translationCache[a.url];
-    return !isAlreadyJP && !cached;
-  });
-  if (!toTranslate.length) return;
+function toggleCardTitle(url, btnEl) {
+  const card = btnEl.closest('.card');
+  const titleEl = card?.querySelector('.card-title');
+  const article  = articles.find(a => a.url === url);
+  if (!titleEl || !article) return;
 
-  const badge = document.getElementById('transBadge');
-  badge.classList.add('show');
-
-  // MyMemory無料API: 1件ずつ逐次翻訳（レート制限対策）
-  for (const a of toTranslate) {
-    try {
-      const q = encodeURIComponent(a.title.slice(0, 500));
-      const res = await fetch(`https://api.mymemory.translated.net/get?q=${q}&langpair=en|ja`);
-      const data = await res.json();
-      const translated = data?.responseData?.translatedText;
-      if (translated && translated !== a.title) {
-        translationCache[a.url] = translated;
-      } else {
-        translationCache[a.url] = a.title; // fallback
-      }
-      renderList();
-      await sleep(120); // レート制限対策
-    } catch(e) {
-      translationCache[a.url] = a.title; // エラー時はそのまま
-    }
+  const isJP = btnEl.dataset.state === 'jp';
+  if (isJP) {
+    // ENに戻す
+    titleEl.textContent = article.title;
+    btnEl.textContent   = 'JP';
+    btnEl.dataset.state = 'en';
+    btnEl.classList.remove('done', 'loading');
+  } else {
+    // JPに切り替え
+    titleEl.textContent = translationCache[url] || article.title;
+    btnEl.textContent   = 'EN';
+    btnEl.dataset.state = 'jp';
+    btnEl.classList.add('done');
+    btnEl.classList.remove('loading');
   }
-  badge.classList.remove('show');
 }
 
 // ─────────────────────────────────────────
@@ -846,26 +828,27 @@ function renderList() {
       ? `<span class="card-score ${a.score>=0?'sp':'sn'}">${a.score>0?'+':''}${a.score.toFixed(2)}</span>`
       : '';
     const date = fmtDate(a.pubDate);
-    // Use translated title if in JP mode and translation is available
-    let displayTitle = a.title;
-    if (langMode === 'jp') {
-      if (a.lang === 'ja') {
-        displayTitle = a.title; // already Japanese
-      } else {
-        displayTitle = translationCache[a.url] || a.title; // use cache or fallback
-      }
-    }
+    const cached = translationCache[a.url];
+    const showBtn = a.lang !== 'ja'; // 日本語記事にはボタン不要
+    const btnState  = cached ? 'en' : 'en';
+    const btnLabel  = 'JP';
+    const btnClass  = cached ? 'tl-btn done' : 'tl-btn';
+    const displayTitle = (cached && btnState === 'jp') ? cached : a.title;
+    const tlBtn = showBtn
+      ? `<button class="${btnClass}" data-state="${btnState}" data-url="${esc(a.url)}"
+           onclick="event.stopPropagation();translateCard('${esc(a.url)}',this)">${btnLabel}</button>`
+      : '';
     return `<div class="card" onclick="openArticle('${esc(a.url)}')" style="animation-delay:${Math.min(i*.025,.5)}s;cursor:pointer">
       <div class="bar ${barCls}"></div>
       <div class="card-body">
-        <div class="card-title">${esc(displayTitle)}</div>
+        <div class="card-title">${esc(a.title)}</div>
         <div class="card-meta">
           <span class="src ${srcCls}">${esc(a.source)}</span>
           <span class="card-date">${date}</span>
           ${score}
         </div>
       </div>
-      <div class="chevron">›</div>
+      ${tlBtn}
     </div>`;
   }).join('');
 }
@@ -881,7 +864,6 @@ function updateStats() {
   const show = articles.length > 0;
   document.getElementById('stats').classList.toggle('show', show);
   document.getElementById('ftabs').classList.toggle('show', show);
-  if (!show) document.getElementById('langToggle').classList.remove('show');
 }
 
 function flt(f) {
