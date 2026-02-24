@@ -451,6 +451,18 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
     </div>
 
     <div class="sfield" style="margin-top:24px">
+      <label>📱 リンクを開くブラウザ <span style="font-size:10px;color:var(--text3)">(iPhone)</span></label>
+      <select class="sinput" id="browserSelect" onchange="saveCfg()">
+        <option value="safari">Safari（デフォルト）</option>
+        <option value="chrome">Google Chrome</option>
+        <option value="brave">Brave</option>
+        <option value="firefox">Firefox</option>
+        <option value="edge">Microsoft Edge</option>
+      </select>
+      <div class="sinfo">選択したブラウザがiPhoneにインストールされている必要があります</div>
+    </div>
+
+    <div class="sfield" style="margin-top:24px">
       <label>🌐 CORSプロキシ</label>
       <select class="sinput" id="proxySelect" onchange="saveCfg()">
         <option value="allorigins">allorigins.win（デフォルト）</option>
@@ -498,8 +510,10 @@ const SOURCES_DEF = [
 
 let cfg = JSON.parse(localStorage.getItem('fn_cfg') || 'null') || {
   proxy: 'allorigins',
+  browser: 'safari',
   sources: Object.fromEntries(SOURCES_DEF.map(s => [s.id, s.enabled]))
 };
+if (!cfg.browser) cfg.browser = 'safari'; // migrate old saves
 let watchlist = JSON.parse(localStorage.getItem('fn_watch') || '[]');
 let articles  = [];
 let filter    = 'all';
@@ -781,30 +795,22 @@ async function translatePendingArticles() {
   const badge = document.getElementById('transBadge');
   badge.classList.add('show');
 
-  // Batch translate in chunks of 10
-  const CHUNK = 10;
-  for (let i = 0; i < toTranslate.length; i += CHUNK) {
-    const chunk = toTranslate.slice(i, i + CHUNK);
-    const titlesJson = JSON.stringify(chunk.map(a => ({ id: a.url, title: a.title })));
+  // MyMemory無料API: 1件ずつ逐次翻訳（レート制限対策）
+  for (const a of toTranslate) {
     try {
-      const res = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 1000,
-          system: 'You are a financial news headline translator. Translate English headlines to Japanese concisely. Respond ONLY with a JSON array like: [{"id":"...","title":"..."}]. Keep proper nouns (company names, ticker symbols) as-is. No markdown, no extra text.',
-          messages: [{ role: 'user', content: `Translate these headlines to Japanese:\n${titlesJson}` }]
-        })
-      });
+      const q = encodeURIComponent(a.title.slice(0, 500));
+      const res = await fetch(`https://api.mymemory.translated.net/get?q=${q}&langpair=en|ja`);
       const data = await res.json();
-      const text = data.content?.[0]?.text || '[]';
-      const clean = text.replace(/```json|```/g, '').trim();
-      const translated = JSON.parse(clean);
-      translated.forEach(t => { translationCache[t.id] = t.title; });
+      const translated = data?.responseData?.translatedText;
+      if (translated && translated !== a.title) {
+        translationCache[a.url] = translated;
+      } else {
+        translationCache[a.url] = a.title; // fallback
+      }
       renderList();
+      await sleep(120); // レート制限対策
     } catch(e) {
-      console.error('Translation error:', e);
+      translationCache[a.url] = a.title; // エラー時はそのまま
     }
   }
   badge.classList.remove('show');
@@ -849,7 +855,7 @@ function renderList() {
         displayTitle = translationCache[a.url] || a.title; // use cache or fallback
       }
     }
-    return `<a class="card" href="${esc(a.url)}" target="_blank" rel="noopener noreferrer" style="animation-delay:${Math.min(i*.025,.5)}s">
+    return `<div class="card" onclick="openArticle('${esc(a.url)}')" style="animation-delay:${Math.min(i*.025,.5)}s;cursor:pointer">
       <div class="bar ${barCls}"></div>
       <div class="card-body">
         <div class="card-title">${esc(displayTitle)}</div>
@@ -860,7 +866,7 @@ function renderList() {
         </div>
       </div>
       <div class="chevron">›</div>
-    </a>`;
+    </div>`;
   }).join('');
 }
 
@@ -943,7 +949,8 @@ function renderSrcToggles() {
         style="width:20px;height:20px;accent-color:var(--accent);cursor:pointer">
     </label>`).join('');
 
-  document.getElementById('proxySelect').value = cfg.proxy || 'allorigins';
+  document.getElementById('proxySelect').value   = cfg.proxy   || 'allorigins';
+  document.getElementById('browserSelect').value = cfg.browser || 'safari';
 }
 
 function toggleSrc(id, val) {
@@ -952,8 +959,36 @@ function toggleSrc(id, val) {
 }
 
 function saveCfg() {
-  cfg.proxy = document.getElementById('proxySelect').value;
+  cfg.proxy    = document.getElementById('proxySelect').value;
+  cfg.browser  = document.getElementById('browserSelect').value;
   localStorage.setItem('fn_cfg', JSON.stringify(cfg));
+}
+
+// ブラウザ別URLスキーム変換
+function toBrowserUrl(url) {
+  const b = cfg.browser || 'safari';
+  if (b === 'safari')  return url; // そのまま
+  if (b === 'chrome') {
+    // googlechrome:// または googlechromes://
+    return url.replace(/^http:\/\//, 'googlechrome://')
+               .replace(/^https:\/\//, 'googlechromes://');
+  }
+  if (b === 'brave') {
+    return url.replace(/^http:\/\//, 'brave://')
+               .replace(/^https:\/\//, 'brave://');
+  }
+  if (b === 'firefox') {
+    return `firefox://open-url?url=${encodeURIComponent(url)}`;
+  }
+  if (b === 'edge') {
+    return `microsoft-edge-https://${url.replace(/^https?:\/\//, '')}`;
+  }
+  return url;
+}
+
+function openArticle(url) {
+  const dest = toBrowserUrl(url);
+  window.location.href = dest;
 }
 
 function clearData() {
